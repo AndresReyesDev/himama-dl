@@ -11,7 +11,8 @@ import (
 // markup is minified: lillio currently emits it unquoted, but Rails' default
 // csrf_meta_tags helper emits it double-quoted. Both must parse to the token.
 func TestExtractCSRFToken(t *testing.T) {
-	const token = "S6RZN2HUF6sIC7pzk9HE1gUXLghHI3fTXxQAgvn38Z0QzJhTpn7Gpw879IssIcNQqAa-IzRJSV2Hkr0jyfsJEg"
+	// Synthetic fixture — only needs base64url shape, not a live token.
+	const token = "FAKEtestCSRFtoken_not-a-real-secret_0123456789abcdefABCDEF-_ghijklmnopqrstuvwxyz"
 
 	cases := map[string]string{
 		"unquoted (live lillio format)": `<head><meta name=csrf-token content=` + token + ` /></head>`,
