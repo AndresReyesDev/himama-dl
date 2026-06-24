@@ -6,7 +6,7 @@ This worked for me two years ago when my oldest child left daycare, and I haven'
 
 # himama-dl
 
-An unofficial bulk downloader for [HiMama](https://www.himama.com) "Activities" (photos/videos).
+An unofficial bulk downloader for [HiMama, now rebranded as Lillio](https://www.lillio.com) "Activities" (photos/videos). The old `www.himama.com` domain now redirects to `app.lillio.com`, which this tool targets.
 
 This scrapes your kid's activities through the website, and it's likely to be quite brittle.
 
