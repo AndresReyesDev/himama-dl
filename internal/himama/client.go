@@ -12,7 +12,8 @@ import (
 	"golang.org/x/net/html"
 )
 
-const Host = "www.himama.com"
+// HiMama rebranded to Lillio; www.himama.com now 308-redirects here.
+const Host = "app.lillio.com"
 const BaseURL = "https://" + Host
 const LoginURL = BaseURL + "/login"
 
@@ -104,75 +105,109 @@ func (c *Client) Activities(child Child, page int) ([]Activity, error) {
 	}
 
 	for _, row := range rows {
-		addedBy := nodeText(nthChild(row, 1))
-		date := nodeText(nthChild(row, 3))
-		title := ""
-		if n := nthChild(row, 5).FirstChild.NextSibling; n != nil {
-			title = n.FirstChild.Data
-		}
-		url := ""
-		if n := nthChild(row, 17); n != nil && n.FirstChild != nil {
-			n = n.FirstChild.NextSibling
-
-			if n != nil && n.Data == "a" {
-				for _, attr := range n.Attr {
-					if attr.Key == "href" {
-						url = attr.Val
-						break
-					}
-				}
-			}
-		}
-
-		if url != "" {
-			results = append(results, Activity{
-				AddedBy:  addedBy,
-				Date:     date,
-				Title:    title,
-				MediaURL: url,
-			})
+		if activity, ok := parseActivityRow(row); ok {
+			results = append(results, activity)
 		}
 	}
 
 	return results, nil
 }
 
+// parseActivityRow extracts an Activity from a single <tr> of the activities
+// table. The layout is rigid — cells sit at fixed odd-numbered child indices
+// because whitespace text nodes occupy the even ones — but some rows deviate
+// (header rows, or activities whose title cell is shaped differently), so every
+// node access is guarded. A row that yields no media URL is reported as not-ok
+// and skipped by the caller rather than crashing the whole download.
+func parseActivityRow(row *html.Node) (Activity, bool) {
+	mediaURL := ""
+	if cell := nthChild(row, 17); cell != nil && cell.FirstChild != nil {
+		if a := cell.FirstChild.NextSibling; a != nil && a.Data == "a" {
+			for _, attr := range a.Attr {
+				if attr.Key == "href" {
+					mediaURL = attr.Val
+					break
+				}
+			}
+		}
+	}
+
+	if mediaURL == "" {
+		return Activity{}, false
+	}
+
+	title := ""
+	if cell := nthChild(row, 5); cell != nil && cell.FirstChild != nil {
+		if n := cell.FirstChild.NextSibling; n != nil && n.FirstChild != nil {
+			title = n.FirstChild.Data
+		}
+	}
+
+	return Activity{
+		AddedBy:  nodeText(nthChild(row, 1)),
+		Date:     nodeText(nthChild(row, 3)),
+		Title:    title,
+		MediaURL: mediaURL,
+	}, true
+}
+
 // getLoginForm fetches the login form, decorates client (via its cookiejar) with a session cookie,
 // and extacts the csrf-token from the response body so it can be used in postLoginForm to submit credentials
-func getLoginForm(client *http.Client) (csrfToken []byte, err error) {
+func getLoginForm(client *http.Client) (csrfToken string, err error) {
 	// First, fetch the login form so we can extract the cookie and authenticity token
 	res, err := client.Get(LoginURL)
 	if err != nil {
-		return nil, fmt.Errorf("unable to get %s: %w", LoginURL, err)
+		return "", fmt.Errorf("unable to get %s: %w", LoginURL, err)
 	}
 	defer res.Body.Close()
 
 	if res.StatusCode != 200 {
-		return nil, fmt.Errorf("GET %s: Unxpected response %d (want 200)", LoginURL, res.StatusCode)
+		return "", fmt.Errorf("GET %s: Unxpected response %d (want 200)", LoginURL, res.StatusCode)
 	}
 
-	body, err := io.ReadAll(res.Body)
+	token, err := extractCSRFToken(res.Body)
 	if err != nil {
-		return nil, fmt.Errorf("GET %s: Failed reading response body: %w", LoginURL, err)
+		return "", fmt.Errorf("GET %s: %w", LoginURL, err)
 	}
 
-	// TODO: Using regex to parse HTML? Why not.
-	re := regexp.MustCompile(`<meta name=csrf-token content=([a-zA-Z0-9_\/+\-]+=*) />`)
-	match := re.FindSubmatch(body)
-	if len(match) != 2 {
-		//return nil, fmt.Errorf("GET %s in %s: Cannot find authenticity token in response", LoginURL, body)
-		return nil, fmt.Errorf("GET %s: Cannot find authenticity token in response", LoginURL)
+	return token, nil
+}
+
+// extractCSRFToken pulls the value of <meta name="csrf-token" content="..."> out
+// of an HTML document. It uses the HTML parser rather than a regex so it is
+// indifferent to whether the markup quotes the attribute values, the order of
+// the attributes, or any base64 padding in the token (lillio currently serves
+// the tag unquoted; Rails' default helper emits it double-quoted).
+func extractCSRFToken(body io.Reader) (string, error) {
+	metas, err := filterTags(body, func(n *html.Node) bool {
+		if n.Type == html.ElementNode && n.Data == "meta" {
+			for _, attr := range n.Attr {
+				if attr.Key == "name" && attr.Val == "csrf-token" {
+					return true
+				}
+			}
+		}
+		return false
+	})
+	if err != nil {
+		return "", err
 	}
 
-	csrfToken = match[1]
+	for _, meta := range metas {
+		for _, attr := range meta.Attr {
+			if attr.Key == "content" && attr.Val != "" {
+				return attr.Val, nil
+			}
+		}
+	}
 
-	return csrfToken, nil
+	return "", fmt.Errorf("Cannot find authenticity token in response")
 }
 
 // postLoginForm submits the login request and decoartes the given client (via its cookie jar) with authentication
-func postLoginForm(client *http.Client, csrfToken []byte, username, password string) error {
+func postLoginForm(client *http.Client, csrfToken string, username, password string) error {
 	data := url.Values{}
-	data.Set("authenticity_token", string(csrfToken))
+	data.Set("authenticity_token", csrfToken)
 	data.Set("utf8", "✓")
 	data.Set("user[login]", username)
 	data.Set("user[password]", password)
@@ -214,6 +249,9 @@ func filterTags(htmlDoc io.Reader, filter func(*html.Node) bool) ([]*html.Node, 
 }
 
 func nodeText(n *html.Node) string {
+	if n == nil {
+		return ""
+	}
 	child := n.FirstChild
 	if child == nil {
 		return ""
