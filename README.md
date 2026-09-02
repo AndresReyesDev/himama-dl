@@ -38,13 +38,13 @@ himama-dl [-username email] [-password password] [-output dir]
 
 ```
 output/
-  Stella (2769573)/
+  Child Name (1234567)/
     Activities/
       2026-08-31/
-        2026-08-31 - Preschool 3 Room - It's Lunch Time - f660d356.jpg
-        2026-08-31 - Sara Rezaie - Feeling Curious Today - fc95750e.mov
+        2026-08-31 - Classroom - Activity Title - a1b2c3d4.jpg
+        2026-08-31 - Teacher Name - Another Activity - e5f6g7h8.mov
       2026-09-01/
-        2026-09-01 - Sara Rezaie - Look what I'm doing today - 19ce024d.jpeg
+        2026-09-01 - Teacher Name - Activity Title - 1a2b3c4d.jpeg
         ...
     Reports/
       2026-08-31.pdf
