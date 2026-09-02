@@ -1,17 +1,19 @@
 package main
 
 import (
-	"errors"
 	"bufio"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
 	"os"
+	"regexp"
 	"sync"
 	"sync/atomic"
-	"regexp"
+
+	"golang.org/x/term"
 
 	"github.com/meagar/himama-dl/internal/himama"
 )
@@ -66,9 +68,12 @@ func fetchCredentials() (username string, password string, err error) {
 
 	if password == "" {
 		fmt.Print("Password: ")
-		scanner := bufio.NewScanner(os.Stdin)
-		scanner.Scan()
-		password = scanner.Text()
+		bytePassword, err := term.ReadPassword(int(os.Stdin.Fd()))
+		fmt.Println()
+		if err != nil {
+			return "", "", fmt.Errorf("unable to read password: %w", err)
+		}
+		password = string(bytePassword)
 	}
 
 	return
@@ -77,7 +82,9 @@ func fetchCredentials() (username string, password string, err error) {
 var total, completed, skipped int32
 
 func scrape(client *himama.Client, child himama.Child) error {
-	mkdir("./" + child.Name)
+	if err := mkdir("./" + child.Name); err != nil {
+		return err
+	}
 
 	work := scrapeActivities(client, child)
 
@@ -97,11 +104,27 @@ func spawnDownloadWorkers(child himama.Child, work <-chan himama.Activity) {
 		wg.Add(1)
 		go func(activity himama.Activity) {
 			defer wg.Done()
-			filename := filterWindowsFilename(activity.SuggestedLocalFilename())
+			filename, err := activity.SuggestedLocalFilename()
+			if err != nil {
+				fmt.Printf("Skipping activity: %v\n", err)
+				<-tickets
+				return
+			}
+			filename = filterWindowsFilename(filename)
 
 			dest := "./" + child.Name + "/" + filename
-			if !fileExists(dest) {
-				download(activity.MediaURL, dest)
+			exists, err := fileExists(dest)
+			if err != nil {
+				fmt.Printf("Error checking %s: %v\n", dest, err)
+				<-tickets
+				return
+			}
+			if !exists {
+				if err := download(activity.MediaURL, dest); err != nil {
+					fmt.Printf("Error downloading %s: %v\n", dest, err)
+					<-tickets
+					return
+				}
 				atomic.AddInt32(&completed, 1)
 			} else {
 				atomic.AddInt32(&skipped, 1)
@@ -115,20 +138,21 @@ func spawnDownloadWorkers(child himama.Child, work <-chan himama.Activity) {
 	wg.Wait()
 }
 
-func download(srcURL, destPath string) {
+func download(srcURL, destPath string) error {
 	res, err := http.Get(srcURL)
 	if err != nil {
-		panic(err)
+		return fmt.Errorf("unable to download %s: %w", srcURL, err)
 	}
 	defer res.Body.Close()
 	fh, err := os.OpenFile(destPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
-		panic(err)
+		return fmt.Errorf("unable to create %s: %w", destPath, err)
 	}
 	defer fh.Close()
 	if _, err := io.Copy(fh, res.Body); err != nil {
-		panic(err)
+		return fmt.Errorf("error writing %s: %w", destPath, err)
 	}
+	return nil
 }
 
 // Scraps the activity index pages
@@ -150,10 +174,9 @@ func scrapeActivities(client *himama.Client, child himama.Child) <-chan himama.A
 
 				activities, err := client.Activities(child, page)
 				if err != nil {
-					panic(err)
-				}
-
-				if len(activities) == 0 {
+					fmt.Printf("Error fetching page %d: %v\n", page, err)
+					done = true
+				} else if len(activities) == 0 {
 					done = true
 				} else {
 					atomic.AddInt32(&total, int32(len(activities)))
@@ -178,15 +201,10 @@ func selectChildren(children []himama.Child) ([]himama.Child, error) {
 		return nil, fmt.Errorf("no children found")
 	}
 
-	//  single child codepath errors, so use multi-child codepath instead
-	
-	//if len(children) == 1 {
-	//	fmt.Println("Found 1 child:")
-	//	fmt.Printf("%s (%s)\n", children[0].Name, children[0].ID)
-	//	fmt.Printf("Press return to continue")
-	//	fmt.Scan()
-	//	return nil, fmt.Errorf("TODO: Impmement single child download")
-	//}
+	if len(children) == 1 {
+		fmt.Printf("Found 1 child: %s (%s)\n", children[0].Name, children[0].ID)
+		return children, nil
+	}
 
 	var choice int
 	for {
@@ -208,24 +226,25 @@ func selectChildren(children []himama.Child) ([]himama.Child, error) {
 	return []himama.Child{children[choice-1]}, nil
 }
 
-func mkdir(path string) {
+func mkdir(path string) error {
 	if err := os.Mkdir(path, 0700); err != nil {
 		if !os.IsExist(err) {
-			panic(fmt.Errorf("unable to create directory ./%s: %w", path, err))
+			return fmt.Errorf("unable to create directory ./%s: %w", path, err)
 		}
 	}
+	return nil
 }
 
-func fileExists(path string) bool {
+func fileExists(path string) (bool, error) {
 	_, err := os.Stat(path)
 
 	if err == nil {
-		return true
+		return true, nil
 	} else if errors.Is(err, fs.ErrNotExist) {
-		return false
+		return false, nil
 	}
 
-	panic(err)
+	return false, err
 }
 
 func filterWindowsFilename(input string) string {
