@@ -21,6 +21,10 @@ type Client struct {
 	client *http.Client
 }
 
+func (c *Client) Get(url string) (*http.Response, error) {
+	return c.client.Get(url)
+}
+
 func NewClient(username, password string) (*Client, error) {
 	jar, err := cookiejar.New(nil)
 	if err != nil {
@@ -50,6 +54,7 @@ func (c *Client) FetchChildren() ([]Child, error) {
 	}
 	defer res.Body.Close()
 
+	// Find account links
 	results, err := filterTags(res.Body, func(node *html.Node) bool {
 		if node.Type == html.ElementNode && node.Data == "a" {
 			for _, attr := range node.Attr {
@@ -60,15 +65,37 @@ func (c *Client) FetchChildren() ([]Child, error) {
 		}
 		return false
 	})
-
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch children: %w", err)
 	}
 
-	children := []Child{}
+	// Find child names from dropdown-toggle elements
+	nameRes, err := filterTags(res.Body, func(node *html.Node) bool {
+		if node.Type == html.ElementNode && node.Data == "a" {
+			for _, attr := range node.Attr {
+				if attr.Key == "class" && strings.Contains(attr.Val, "dropdown-toggle") {
+					return true
+				}
+			}
+		}
+		return false
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch children: %w", err)
+	}
 
+	names := []string{}
+	for _, n := range nameRes {
+		name := strings.TrimSpace(allText(n))
+		if name != "" {
+			names = append(names, name)
+		}
+	}
+
+	// Deduplicate account links by ID (hidden-phone and visible-phone both have them)
+	seen := map[string]bool{}
+	children := []Child{}
 	for _, result := range results {
-		// find the href attribute and extract the account ID
 		var id string
 		for _, attr := range result.Attr {
 			if attr.Key == "href" {
@@ -77,10 +104,20 @@ func (c *Client) FetchChildren() ([]Child, error) {
 				break
 			}
 		}
-		children = append(children, Child{
-			Name: strings.TrimSpace(result.FirstChild.Data),
-			ID:   id,
-		})
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+
+		name := strings.TrimSpace(result.FirstChild.Data)
+		// If the link text is a nav label like "Profile", try to use the dropdown name
+		if name == "Profile" && len(names) > 0 {
+			idx := len(children)
+			if idx < len(names) {
+				name = names[idx]
+			}
+		}
+		children = append(children, Child{Name: name, ID: id})
 	}
 
 	return children, nil
@@ -111,6 +148,93 @@ func (c *Client) Activities(child Child, page int) ([]Activity, error) {
 	}
 
 	return results, nil
+}
+
+func (c *Client) Reports(child Child, page int) ([]Report, error) {
+	url := fmt.Sprintf("%s/accounts/%s/reports?page=%d", BaseURL, child.ID, page)
+	res, err := c.client.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+
+	re := regexp.MustCompile(`^/reports/\d+$`)
+
+	links, err := filterTags(res.Body, func(n *html.Node) bool {
+		if n.Type == html.ElementNode && n.Data == "a" {
+			for _, attr := range n.Attr {
+				if attr.Key == "href" && re.MatchString(attr.Val) {
+					return true
+				}
+			}
+		}
+		return false
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	reports := []Report{}
+	for _, link := range links {
+		linkText := strings.TrimSpace(nodeText(link))
+		if linkText != "View Report" {
+			continue
+		}
+
+		href := ""
+		for _, attr := range link.Attr {
+			if attr.Key == "href" {
+				href = attr.Val
+				break
+			}
+		}
+
+		date := ""
+		if row := findParentRow(link); row != nil {
+			date = findDateInRow(row)
+		}
+
+		reports = append(reports, Report{
+			Date: date,
+			URL:  BaseURL + href,
+		})
+	}
+
+	return reports, nil
+}
+
+func findParentRow(n *html.Node) *html.Node {
+	for p := n.Parent; p != nil; p = p.Parent {
+		if p.Type == html.ElementNode && p.Data == "tr" {
+			return p
+		}
+	}
+	return nil
+}
+
+var dateRe = regexp.MustCompile(`\b\d{1,2}/\d{1,2}/\d{2}\b`)
+
+func findDateInRow(row *html.Node) string {
+	for c := row.FirstChild; c != nil; c = c.NextSibling {
+		if c.Type == html.ElementNode && c.Data == "td" {
+			text := allText(c)
+			if match := dateRe.FindString(text); match != "" {
+				return match
+			}
+		}
+	}
+	return ""
+}
+
+func allText(n *html.Node) string {
+	if n.Type == html.TextNode {
+		return n.Data
+	}
+	var sb strings.Builder
+	for c := n.FirstChild; c != nil; c = c.NextSibling {
+		sb.WriteString(allText(c))
+	}
+	return sb.String()
 }
 
 // parseActivityRow extracts an Activity from a single <tr> of the activities

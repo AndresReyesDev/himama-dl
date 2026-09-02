@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sync"
 	"sync/atomic"
@@ -19,7 +20,7 @@ import (
 )
 
 func main() {
-	fmt.Println("himama-dl v0.0.3")
+	fmt.Println("himama-dl v0.0.4")
 
 	username, password, err := fetchCredentials()
 	if err != nil {
@@ -57,6 +58,7 @@ func main() {
 func fetchCredentials() (username string, password string, err error) {
 	flag.StringVar(&username, "username", "", "HiMama username (ie, your email)")
 	flag.StringVar(&password, "password", "", "HiMama password")
+	flag.StringVar(&outputDir, "output", "output", "Output directory")
 	flag.Parse()
 
 	if username == "" {
@@ -80,21 +82,30 @@ func fetchCredentials() (username string, password string, err error) {
 }
 
 var total, completed, skipped int32
+var outputDir string
 
 func scrape(client *himama.Client, child himama.Child) error {
-	if err := mkdir("./" + child.Name); err != nil {
-		return err
+	childDirName := fmt.Sprintf("%s (%s)", child.Name, child.ID)
+	baseDir := filepath.Join(outputDir, childDirName)
+	activitiesDir := filepath.Join(baseDir, "Activities")
+	reportsDir := filepath.Join(baseDir, "Reports")
+
+	for _, dir := range []string{baseDir, activitiesDir, reportsDir} {
+		if err := mkdir(dir); err != nil {
+			return err
+		}
 	}
 
 	work := scrapeActivities(client, child)
+	spawnDownloadWorkers(child, activitiesDir, work)
 
-	// blocks until all downloads are finished
-	spawnDownloadWorkers(child, work)
+	reportWork := scrapeReports(client, child)
+	spawnReportWorkers(client, reportsDir, reportWork)
 
 	return nil
 }
 
-func spawnDownloadWorkers(child himama.Child, work <-chan himama.Activity) {
+func spawnDownloadWorkers(child himama.Child, activitiesDir string, work <-chan himama.Activity) {
 	wg := sync.WaitGroup{}
 	// These workers hit S3, so we can parallelize pretty heavily
 	tickets := make(chan struct{}, 10)
@@ -112,7 +123,22 @@ func spawnDownloadWorkers(child himama.Child, work <-chan himama.Activity) {
 			}
 			filename = filterWindowsFilename(filename)
 
-			dest := "./" + child.Name + "/" + filename
+			dateDir, err := activity.DateISO()
+			if err != nil {
+				fmt.Printf("Skipping activity: %v\n", err)
+				<-tickets
+				return
+			}
+			dateDir = filterWindowsFilename(dateDir)
+
+			destDir := filepath.Join(activitiesDir, dateDir)
+			if err := mkdir(destDir); err != nil {
+				fmt.Printf("Error creating directory %s: %v\n", destDir, err)
+				<-tickets
+				return
+			}
+
+			dest := filepath.Join(destDir, filename)
 			exists, err := fileExists(dest)
 			if err != nil {
 				fmt.Printf("Error checking %s: %v\n", dest, err)
@@ -157,6 +183,103 @@ func download(srcURL, destPath string) error {
 
 // Scraps the activity index pages
 // Returns a channel over which activity media links (ie links to S3 objects) are sent
+func scrapeReports(client *himama.Client, child himama.Child) <-chan himama.Report {
+	work := make(chan himama.Report, 2000)
+
+	wg := sync.WaitGroup{}
+	tickets := make(chan struct{}, 5)
+
+	go func() {
+		done := false
+		for page := 1; !done; page++ {
+			wg.Add(1)
+			tickets <- struct{}{}
+			page := page
+			go func() {
+				defer wg.Done()
+
+				reports, err := client.Reports(child, page)
+				if err != nil {
+					fmt.Printf("Error fetching reports page %d: %v\n", page, err)
+					done = true
+				} else if len(reports) == 0 {
+					done = true
+				} else {
+					for _, report := range reports {
+						work <- report
+					}
+				}
+				<-tickets
+			}()
+		}
+
+		wg.Wait()
+		close(work)
+	}()
+
+	return work
+}
+
+func spawnReportWorkers(client *himama.Client, reportsDir string, work <-chan himama.Report) {
+	wg := sync.WaitGroup{}
+	tickets := make(chan struct{}, 5)
+
+	for report := range work {
+		tickets <- struct{}{}
+		wg.Add(1)
+		go func(report himama.Report) {
+			defer wg.Done()
+
+			dateISO, err := report.DateISO()
+			if err != nil {
+				fmt.Printf("Skipping report: %v\n", err)
+				<-tickets
+				return
+			}
+
+			dest := filepath.Join(reportsDir, filterWindowsFilename(dateISO)+".pdf")
+			exists, err := fileExists(dest)
+			if err != nil {
+				fmt.Printf("Error checking %s: %v\n", dest, err)
+				<-tickets
+				return
+			}
+			if !exists {
+				if err := downloadReport(client, report.URL, dest); err != nil {
+					fmt.Printf("Error downloading %s: %v\n", dest, err)
+					<-tickets
+					return
+				}
+				fmt.Printf("Report: %s\n", dateISO)
+			} else {
+				fmt.Printf("Report (skipped): %s\n", dateISO)
+			}
+			<-tickets
+		}(report)
+	}
+
+	wg.Wait()
+}
+
+func downloadReport(client *himama.Client, srcURL, destPath string) error {
+	res, err := client.Get(srcURL)
+	if err != nil {
+		return fmt.Errorf("unable to download %s: %w", srcURL, err)
+	}
+	defer res.Body.Close()
+
+	fh, err := os.OpenFile(destPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	if err != nil {
+		return fmt.Errorf("unable to create %s: %w", destPath, err)
+	}
+	defer fh.Close()
+
+	if _, err := io.Copy(fh, res.Body); err != nil {
+		return fmt.Errorf("error writing %s: %w", destPath, err)
+	}
+	return nil
+}
+
 func scrapeActivities(client *himama.Client, child himama.Child) <-chan himama.Activity {
 	work := make(chan himama.Activity, 2000)
 
@@ -227,9 +350,9 @@ func selectChildren(children []himama.Child) ([]himama.Child, error) {
 }
 
 func mkdir(path string) error {
-	if err := os.Mkdir(path, 0700); err != nil {
+	if err := os.MkdirAll(path, 0700); err != nil {
 		if !os.IsExist(err) {
-			return fmt.Errorf("unable to create directory ./%s: %w", path, err)
+			return fmt.Errorf("unable to create directory %s: %w", path, err)
 		}
 	}
 	return nil

@@ -17,12 +17,19 @@ type Activity struct {
 	MediaURL string
 }
 
-func (a *Activity) SuggestedLocalFilename() (string, error) {
+func (a *Activity) DateISO() (string, error) {
 	dateParts := strings.Split(a.Date, "/")
 	if len(dateParts) != 3 {
 		return "", fmt.Errorf("unexpected date format %q, expected MM/DD/YY", a.Date)
 	}
-	date := fmt.Sprintf("20%s-%s-%s", dateParts[2], zeroPad(dateParts[0]), zeroPad(dateParts[1]))
+	return fmt.Sprintf("20%s-%s-%s", dateParts[2], zeroPad(dateParts[0]), zeroPad(dateParts[1])), nil
+}
+
+func (a *Activity) SuggestedLocalFilename() (string, error) {
+	date, err := a.DateISO()
+	if err != nil {
+		return "", err
+	}
 
 	parsedURL, err := url.Parse(a.MediaURL)
 	if err != nil {

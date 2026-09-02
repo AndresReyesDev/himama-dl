@@ -1,42 +1,56 @@
-# Known to be broken. Accepting PRs.
-
-This worked for me two years ago when my oldest child left daycare, and I haven't touched it since. It scrapes the HiMama website and as their site changes, it will break. My youngest is now leaving daycare so I'll put a fixed version up in coming weeks, and then I'll have no opportunity to work on it further.
-
----
-
 # himama-dl
 
-An unofficial bulk downloader for [HiMama, now rebranded as Lillio](https://www.lillio.com) "Activities" (photos/videos). The old `www.himama.com` domain now redirects to `app.lillio.com`, which this tool targets.
+An unofficial bulk downloader for [Lillio](https://www.lillio.com) (formerly HiMama) childcare activities and daily reports.
 
-This scrapes your kid's activities through the website, and it's likely to be quite brittle.
+This scrapes your child's activities and reports through the website, and it's likely to be quite brittle as Lillio changes their site.
 
-`himama-dl` will prompt you for your HiMama credentials, then use it to scrape a list of children/account IDs out of HiMama.com.
-It will then allow you to select which child to download activities for, and then output each childs activities in a subdirector.
+## Features
 
-A typical page of contains activities that look like this:
-
-<img width="953" alt="Screen shot of HiMama activities" src="https://user-images.githubusercontent.com/242474/131499068-e0595e19-df17-48ed-9d88-76eba67913fc.png">
-
-`himama-dl` will download each attached photo or video and name it according to its "Added by", "Date", "Title', and a short hash to ensure uniqueness, for example:
-
-```
-2021-08-17 - Preschool Room - Look what I'm doing today - a4993b62.mov
-2021-08-18 - Preschool Room - Look what I'm doing today - 1e3db443.jpeg
-2021-08-18 - Preschool Room - Look what I'm doing today - cec982de.mov
-2021-08-19 - Preschool Room - Look what I'm doing today - 58af6832.jpeg
-2021-08-19 - Preschool Room - Look what I'm doing today - 8f0231b4.movg
-```
+- Downloads all activity photos and videos, organized into folders by date
+- Downloads daily report PDFs (only completed "View Report" — in-progress "Preview Report" is skipped)
+- Supports multiple children — each child gets their own folder
+- Hidden password input (no echo)
+- Idempotent — re-running skips files that already exist, only downloads new ones
 
 ## Installation
 
 ```
-go install github.com/meagar/himama-dl@latest
+go install github.com/AndresReyesDev/himama-dl@latest
 ```
 
 ## Usage
 
-1. Run `himama-dl`; it will prompt for your HiMama credentials
+1. Run `himama-dl`; it will prompt for your Lillio credentials
 2. Select which child to download data for (or press enter if only one child is found)
 3. Wait
+
+### CLI flags
+
+```
+himama-dl [-username email] [-password password] [-output dir]
+```
+
+- `-username` — Lillio username (your email). If omitted, you'll be prompted.
+- `-password` — Lillio password. If omitted, you'll be prompted (hidden input).
+- `-output` — Output directory (default: `output`)
+
+## Output structure
+
+```
+output/
+  Stella (2769573)/
+    Activities/
+      2026-08-31/
+        2026-08-31 - Preschool 3 Room - It's Lunch Time - f660d356.jpg
+        2026-08-31 - Sara Rezaie - Feeling Curious Today - fc95750e.mov
+      2026-09-01/
+        2026-09-01 - Sara Rezaie - Look what I'm doing today - 19ce024d.jpeg
+        ...
+    Reports/
+      2026-08-31.pdf
+      2026-09-01.pdf
+```
+
+Each child gets a folder named `Name (AccountID)`. Activities are grouped into subfolders by date, with each file named by date, author, title, and a short hash for uniqueness. Reports are saved as `{date}.pdf`.
 
 
