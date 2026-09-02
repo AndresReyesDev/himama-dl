@@ -101,7 +101,7 @@ func TestParseActivityRowNormal(t *testing.T) {
 }
 
 // The regression: a row whose title-cell element has no text child used to
-// panic on n.FirstChild.Data (client.go:112) and abort the whole download.
+// panic on n.FirstChild.Data and abort the whole download.
 // It must now parse, keep the media URL, and fall back to an empty title.
 func TestParseActivityRowMalformedTitleDoesNotPanic(t *testing.T) {
 	row := buildRow(18, map[int]*html.Node{

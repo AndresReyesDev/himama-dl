@@ -1,6 +1,7 @@
 package himama
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"net/http"
@@ -54,8 +55,13 @@ func (c *Client) FetchChildren() ([]Child, error) {
 	}
 	defer res.Body.Close()
 
-	// Find account links
-	results, err := filterTags(res.Body, func(node *html.Node) bool {
+	bodyBytes, err := io.ReadAll(res.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read page: %w", err)
+	}
+
+	// Find /accounts/{id} links (from breadcrumb) to get IDs
+	linkNodes, err := filterTags(bytes.NewReader(bodyBytes), func(node *html.Node) bool {
 		if node.Type == html.ElementNode && node.Data == "a" {
 			for _, attr := range node.Attr {
 				if attr.Key == "href" && re.MatchString(attr.Val) {
@@ -69,11 +75,11 @@ func (c *Client) FetchChildren() ([]Child, error) {
 		return nil, fmt.Errorf("failed to fetch children: %w", err)
 	}
 
-	// Find child names from dropdown-toggle elements
-	nameRes, err := filterTags(res.Body, func(node *html.Node) bool {
+	// Find child names from dropdown-toggle elements with "bold" class
+	nameNodes, err := filterTags(bytes.NewReader(bodyBytes), func(node *html.Node) bool {
 		if node.Type == html.ElementNode && node.Data == "a" {
 			for _, attr := range node.Attr {
-				if attr.Key == "class" && strings.Contains(attr.Val, "dropdown-toggle") {
+				if attr.Key == "class" && strings.Contains(attr.Val, "dropdown-toggle") && strings.Contains(attr.Val, "bold") {
 					return true
 				}
 			}
@@ -85,19 +91,19 @@ func (c *Client) FetchChildren() ([]Child, error) {
 	}
 
 	names := []string{}
-	for _, n := range nameRes {
+	for _, n := range nameNodes {
 		name := strings.TrimSpace(allText(n))
 		if name != "" {
 			names = append(names, name)
 		}
 	}
 
-	// Deduplicate account links by ID (hidden-phone and visible-phone both have them)
+	// Deduplicate account links by ID, preserving order
 	seen := map[string]bool{}
 	children := []Child{}
-	for _, result := range results {
+	for _, link := range linkNodes {
 		var id string
-		for _, attr := range result.Attr {
+		for _, attr := range link.Attr {
 			if attr.Key == "href" {
 				parts := strings.Split(attr.Val, "/")
 				id = parts[len(parts)-1]
@@ -109,13 +115,9 @@ func (c *Client) FetchChildren() ([]Child, error) {
 		}
 		seen[id] = true
 
-		name := strings.TrimSpace(result.FirstChild.Data)
-		// If the link text is a nav label like "Profile", try to use the dropdown name
-		if name == "Profile" && len(names) > 0 {
-			idx := len(children)
-			if idx < len(names) {
-				name = names[idx]
-			}
+		name := ""
+		if idx := len(children); idx < len(names) {
+			name = names[idx]
 		}
 		children = append(children, Child{Name: name, ID: id})
 	}
@@ -212,15 +214,10 @@ func findParentRow(n *html.Node) *html.Node {
 	return nil
 }
 
-var dateRe = regexp.MustCompile(`\b\d{1,2}/\d{1,2}/\d{2}\b`)
-
 func findDateInRow(row *html.Node) string {
 	for c := row.FirstChild; c != nil; c = c.NextSibling {
 		if c.Type == html.ElementNode && c.Data == "td" {
-			text := allText(c)
-			if match := dateRe.FindString(text); match != "" {
-				return match
-			}
+			return strings.TrimSpace(allText(c))
 		}
 	}
 	return ""
@@ -276,7 +273,7 @@ func parseActivityRow(row *html.Node) (Activity, bool) {
 }
 
 // getLoginForm fetches the login form, decorates client (via its cookiejar) with a session cookie,
-// and extacts the csrf-token from the response body so it can be used in postLoginForm to submit credentials
+// and extracts the csrf-token from the response body so it can be used in postLoginForm to submit credentials
 func getLoginForm(client *http.Client) (csrfToken string, err error) {
 	// First, fetch the login form so we can extract the cookie and authenticity token
 	res, err := client.Get(LoginURL)
@@ -286,7 +283,7 @@ func getLoginForm(client *http.Client) (csrfToken string, err error) {
 	defer res.Body.Close()
 
 	if res.StatusCode != 200 {
-		return "", fmt.Errorf("GET %s: Unxpected response %d (want 200)", LoginURL, res.StatusCode)
+		return "", fmt.Errorf("GET %s: Unexpected response %d (want 200)", LoginURL, res.StatusCode)
 	}
 
 	token, err := extractCSRFToken(res.Body)
@@ -328,7 +325,7 @@ func extractCSRFToken(body io.Reader) (string, error) {
 	return "", fmt.Errorf("Cannot find authenticity token in response")
 }
 
-// postLoginForm submits the login request and decoartes the given client (via its cookie jar) with authentication
+// postLoginForm submits the login request and decorates the given client (via its cookie jar) with authentication
 func postLoginForm(client *http.Client, csrfToken string, username, password string) error {
 	data := url.Values{}
 	data.Set("authenticity_token", csrfToken)
@@ -340,10 +337,11 @@ func postLoginForm(client *http.Client, csrfToken string, username, password str
 	if err != nil {
 		return fmt.Errorf("POST %s Error: %w", LoginURL, err)
 	}
-
-	// TODO: Detect login failure
-
 	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusOK && res.StatusCode != http.StatusFound {
+		return fmt.Errorf("login failed: unexpected status %d", res.StatusCode)
+	}
 
 	return nil
 }
